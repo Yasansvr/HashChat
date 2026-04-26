@@ -16,15 +16,32 @@ TOKEN = "***REMOVED***"
 bot = telebot.TeleBot(TOKEN, parse_mode=None)
 
 DB_FILE = 'users.json'
+MESSAGES_FILE = 'messages.json'
 
 def load_db():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, 'r') as f:
-            return json.load(f)
+    if os.path.exists(DB_FILE) and os.path.getsize(DB_FILE) > 0:
+        try:
+            with open(DB_FILE, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return {}
     return {}
 
 def save_db(db):
     with open(DB_FILE, 'w') as f:
+        json.dump(db, f)
+
+def load_messages():
+    if os.path.exists(MESSAGES_FILE) and os.path.getsize(MESSAGES_FILE) > 0:
+        try:
+            with open(MESSAGES_FILE, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+def save_messages(db):
+    with open(MESSAGES_FILE, 'w') as f:
         json.dump(db, f)
 
 def log_message(sender_id, receiver_id):
@@ -51,18 +68,43 @@ def get_keys_from_password(password: str):
         'sign_pub': sign_public_key
     }
 
-@bot.message_handler(commands=['start', 'help'])
+@bot.message_handler(commands=['start'])
 def send_welcome(message):
+    welcome_text = (
+        "Welcome to the Anonymous Crypto ChatBot!\n\n"
+        "This is an E2EE (End-to-End Encrypted) and\n"
+        "open-source! So you can check the source code from github \n"
+        "AND VERIFY IT VIA APP!\n"
+        "For more information check /abouthashchat\n"
+        "For generating new keys check /help\n"
+        "Have fun and be Anonymous! "
+    )
+    bot.reply_to(message, welcome_text)
+
+    db = load_db()
+    has_key = False
+    for sid, data in db.items():
+        if sid == str(message.chat.id) or (isinstance(data, dict) and data.get('chat_id') == message.chat.id):
+            has_key = True
+            break
+            
+    if not has_key:
+        cmd_newkey(message)
+
+@bot.message_handler(commands=['help'])
+def send_help(message):
     help_text = (
         "Welcome to the Anonymous Crypto Bot!\n\n"
-        "/newkey - Generate a 12-word seed phrase and get your keys/UUID.\n"
-        "/encrypt - Encrypt and send a message to a friend's UUID.\n"
+        "/newkey - Generate a 12-word seed phrase and get your keys/ID.\n"
+        "/delkey - Delete your active keys.\n"
+        "/encrypt - Encrypt and send a message to a friend's public key.\n"
         "/decrypt or /newHashMsg - Decrypt a message sent to you.\n"
         "/sign - Sign a message so others know it's from you.\n"
         "/verify - Verify a signed message from a friend.\n"
         "/abouthashchat - Learn about HashChat's security."
     )
     bot.reply_to(message, help_text)
+
 
 # --- /aboutHashChat ---
 @bot.message_handler(commands=['abouthashchat'])
@@ -79,13 +121,20 @@ def cmd_about(message):
         "*4. Privacy First*\n"
         "When you type your 12-word seed phrase to decrypt or sign, the bot instantly deletes your message from the chat history so it doesn't linger.\n\n"
         "*(Note: Because this operates as a Telegram bot, your seed phrase briefly passes through Telegram's servers when sent. For absolute maximum paranoia, you can run this open-source script locally!)*\n"
-        "*(EVEVRY TIME THAT YOU GENERATE NEWKEY IT IS IMPORTANT TO UPDATE YOUR SOCIAL PUBLIC KEY, OTHERWISE YOU SHOULD TEST ENCRYPTED MESSAGE WITH ALL PREVIOUS PRIVATE KEYS :) )*"
     )
     bot.reply_to(message, about_text, parse_mode='Markdown')
 
 # --- /newkey ---
 @bot.message_handler(commands=['newkey'])
 def cmd_newkey(message):
+    db = load_db()
+    
+    # Check if user already has keys
+    for sid, data in db.items():
+        if sid == str(message.chat.id) or (isinstance(data, dict) and data.get('chat_id') == message.chat.id):
+            bot.reply_to(message, "You already have active keys! Please delete them first using /delkey.")
+            return
+
     mnemo = Mnemonic("english")
     seed_phrase = mnemo.generate(strength=128)
     
@@ -94,10 +143,13 @@ def cmd_newkey(message):
     enc_pub_hex = keys['enc_pub'].encode(encoder=nacl.encoding.HexEncoder).decode('utf-8')
     sign_pub_hex = keys['sign_pub'].encode(encoder=nacl.encoding.HexEncoder).decode('utf-8')
     
-    # Save to DB
-    user_id = str(message.chat.id)
-    db = load_db()
-    db[user_id] = {
+    # Save to DB with short ID
+    short_id = uuid.uuid4().hex[:8]
+    while short_id in db:
+        short_id = uuid.uuid4().hex[:8]
+        
+    db[short_id] = {
+        'chat_id': message.chat.id,
         'enc_pub': enc_pub_hex,
         'sign_pub': sign_pub_hex
     }
@@ -107,12 +159,50 @@ def cmd_newkey(message):
         "Here is your new secret identity!\n\n"
         f"**Your 12-Word Seed Phrase:**\n`{seed_phrase}`\n"
         "*(WRITE THIS DOWN! You will need it to decrypt and sign messages!)*\n\n"
-        f"**Your UUID is:** `{user_id}` (Internal Routing ID)\n\n"
+        f"**Your Routing ID is:** `{short_id}`\n\n"
         f"Encryption Public Key (Give this to your friends so they can encrypt messages to you):\n`{enc_pub_hex}`\n\n"
         f"Signing Public Key (Give this to your friends so they can verify your messages):\n`{sign_pub_hex}`\n\n"
         "Remember: Use the Encryption key to receive messages, and the Signing key to prove your identity!"
     )
     bot.send_message(message.chat.id, reply, parse_mode='Markdown')
+
+# --- /delkey ---
+@bot.message_handler(commands=['delkey'])
+def cmd_delkey(message):
+    msg = bot.reply_to(message, "Please reply with your 12-word seed phrase to confirm deletion of your keys. I will delete your reply.")
+    bot.register_next_step_handler(msg, process_delkey_password)
+
+def process_delkey_password(message):
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        pass
+        
+    password = message.text.strip() if message.text else ""
+    if not password:
+        bot.send_message(message.chat.id, "Invalid seed phrase.")
+        return
+        
+    try:
+        keys = get_keys_from_password(password)
+        enc_pub_hex = keys['enc_pub'].encode(encoder=nacl.encoding.HexEncoder).decode('utf-8')
+    except Exception:
+        bot.send_message(message.chat.id, "Invalid seed phrase.")
+        return
+
+    db = load_db()
+    to_delete = None
+    for sid, data in db.items():
+        if (sid == str(message.chat.id) or (isinstance(data, dict) and data.get('chat_id') == message.chat.id)) and (isinstance(data, dict) and data.get('enc_pub') == enc_pub_hex):
+            to_delete = sid
+            break
+            
+    if to_delete:
+        del db[to_delete]
+        save_db(db)
+        bot.send_message(message.chat.id, "✅ Your keys and Routing ID have been permanently deleted from the database. You are no longer registered.\n\nYou can generate new keys anytime using /newkey.")
+    else:
+        bot.send_message(message.chat.id, "Seed phrase does not match your active keys, or you don't have any active keys.")
 
 # --- /encrypt ---
 @bot.message_handler(commands=['encrypt'])
@@ -145,10 +235,18 @@ def process_encrypt_final(message, pub_key_hex, msg_text):
         return
         
     db = load_db()
-    friend_uuid = None
-    for uuid, keys in db.items():
-        if keys.get('enc_pub') == pub_key_hex:
-            friend_uuid = uuid
+    friend_chat_id = None
+    friend_short_id = None
+    for sid, keys in db.items():
+        if isinstance(keys, dict) and keys.get('enc_pub') == pub_key_hex:
+            friend_chat_id = keys.get('chat_id') or sid
+            friend_short_id = sid
+            break
+            
+    sender_short_id = str(message.chat.id)
+    for sid, keys in db.items():
+        if isinstance(keys, dict) and keys.get('chat_id') == message.chat.id:
+            sender_short_id = sid
             break
             
     try:
@@ -156,22 +254,49 @@ def process_encrypt_final(message, pub_key_hex, msg_text):
         encrypted = sealed_box.encrypt(msg_text.encode('utf-8'), encoder=nacl.encoding.HexEncoder)
         encrypted_text = encrypted.decode('utf-8')
         
-        if friend_uuid:
+        # Generate short ID for the message
+        msg_id = hashlib.sha256(encrypted_text.encode()).hexdigest()[:10]
+        msg_db = load_messages()
+        msg_db[msg_id] = encrypted_text
+        save_messages(msg_db)
+        
+        if friend_chat_id:
             # Send to friend
-            bot.send_message(friend_uuid, f"You received a new encrypted message!\n`/decrypt {encrypted_text}`", parse_mode='Markdown')
+            bot.send_message(friend_chat_id, f"You received a new encrypted message!\n`/newHashMsg_{msg_id}`", parse_mode='Markdown')
             bot.reply_to(message, "Message successfully encrypted and routed to the owner of that public key!")
-            log_message(message.chat.id, friend_uuid)
+            log_message(sender_short_id, friend_short_id or friend_chat_id)
         else:
-            bot.reply_to(message, f"Encrypted message (I don't know who owns this key, so please copy and send it manually):\n`/decrypt {encrypted_text}`", parse_mode='Markdown')
+            bot.reply_to(message, f"Encrypted message (I don't know who owns this key, so please copy and send it manually):\n`/newHashMsg_{msg_id}`", parse_mode='Markdown')
     except Exception as e:
         bot.reply_to(message, f"Encryption failed: {e}")
 
 # --- /decrypt or /newHashMsg ---
 @bot.message_handler(commands=['decrypt', 'newHashMsg'])
+@bot.message_handler(regexp=r'^/(decrypt|newHashMsg)_[a-zA-Z0-9]+')
 def cmd_decrypt(message):
-    parts = message.text.split(' ', 1)
+    text = message.text.strip()
+    
+    # Handle /newHashMsg_ID or /decrypt_ID format
+    if '_' in text.split(' ')[0]:
+        cmd_part = text.split(' ')[0]
+        encrypted_hex = cmd_part.split('_', 1)[1]
+        
+        messages_db = load_messages()
+        if encrypted_hex in messages_db:
+            encrypted_hex = messages_db[encrypted_hex]
+            
+        msg = bot.reply_to(message, "Please reply with your 12-word seed phrase to decrypt. I will delete your reply.")
+        bot.register_next_step_handler(msg, process_decrypt_password, encrypted_hex)
+        return
+
+    # Handle /newHashMsg [message] format
+    parts = text.split(' ', 1)
     if len(parts) == 2:
         encrypted_hex = parts[1]
+        messages_db = load_messages()
+        if encrypted_hex in messages_db:
+            encrypted_hex = messages_db[encrypted_hex]
+            
         msg = bot.reply_to(message, "Please reply with your 12-word seed phrase to decrypt. I will delete your reply.")
         bot.register_next_step_handler(msg, process_decrypt_password, encrypted_hex)
     elif len(parts) == 1:
@@ -182,6 +307,10 @@ def cmd_decrypt(message):
 
 def process_decrypt_msg_step(message):
     encrypted_hex = message.text.strip()
+    messages_db = load_messages()
+    if encrypted_hex in messages_db:
+        encrypted_hex = messages_db[encrypted_hex]
+        
     msg = bot.reply_to(message, "Please reply with your 12-word seed phrase to decrypt. I will delete your reply.")
     bot.register_next_step_handler(msg, process_decrypt_password, encrypted_hex)
 
@@ -315,11 +444,16 @@ def query_text(query):
                 encrypted = sealed_box.encrypt(msg_text.encode('utf-8'), encoder=nacl.encoding.HexEncoder)
                 encrypted_text = encrypted.decode('utf-8')
                 
+                msg_id = hashlib.sha256(encrypted_text.encode()).hexdigest()[:10]
+                msg_db = load_messages()
+                msg_db[msg_id] = encrypted_text
+                save_messages(msg_db)
+                
                 results.append(InlineQueryResultArticle(
                     id=str(uuid.uuid4()),
                     title="Send Encrypted Message",
                     description="Tap to send ciphertext to chat",
-                    input_message_content=InputTextMessageContent(f"🔒 You received an encrypted message!\n`/decrypt {encrypted_text}`", parse_mode='Markdown')
+                    input_message_content=InputTextMessageContent(f"🔒 You received an encrypted message!\n`/newHashMsg_{msg_id}`", parse_mode='Markdown')
                 ))
             except Exception as e:
                 results.append(InlineQueryResultArticle(
@@ -380,6 +514,7 @@ def query_text(query):
 
 bot.set_my_commands([
     telebot.types.BotCommand("/newkey", "Generate a 12-word seed phrase and get your keys"),
+    telebot.types.BotCommand("/delkey", "Delete your active keys"),
     telebot.types.BotCommand("/encrypt", "Encrypt and send a message to a friend's public key"),
     telebot.types.BotCommand("/decrypt", "Decrypt a message sent to you"),
     telebot.types.BotCommand("/sign", "Sign a message so others know it's from you"),
