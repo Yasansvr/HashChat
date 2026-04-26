@@ -262,7 +262,7 @@ def process_encrypt_final(message, pub_key_hex, msg_text):
         
         if friend_chat_id:
             # Send to friend
-            bot.send_message(friend_chat_id, f"You received a new encrypted message!\n`/newHashMsg_{msg_id}`", parse_mode='Markdown')
+            bot.send_message(friend_chat_id, f"🔒You received a new encrypted message!\n`/newHashMsg_{msg_id}`", parse_mode='Markdown')
             bot.reply_to(message, "Message successfully encrypted and routed to the owner of that public key!")
             log_message(sender_short_id, friend_short_id or friend_chat_id)
         else:
@@ -285,7 +285,7 @@ def cmd_decrypt(message):
         if encrypted_hex in messages_db:
             encrypted_hex = messages_db[encrypted_hex]
             
-        msg = bot.reply_to(message, "Please reply with your 12-word seed phrase to decrypt. I will delete your reply.")
+        msg = bot.reply_to(message, "🔑Please reply with your 12-word seed phrase to decrypt. I will delete your reply.")
         bot.register_next_step_handler(msg, process_decrypt_password, encrypted_hex)
         return
 
@@ -332,7 +332,7 @@ def process_decrypt_password(message, encrypted_hex):
     try:
         encrypted_bytes = binascii.unhexlify(encrypted_hex)
         decrypted = unseal_box.decrypt(encrypted_bytes)
-        bot.send_message(message.chat.id, f"Decrypted Message:\n{decrypted.decode('utf-8')}")
+        bot.send_message(message.chat.id, f"📭Decrypted Message:\n{decrypted.decode('utf-8')}")
     except nacl.exceptions.CryptoError:
         bot.send_message(message.chat.id, "Decryption failed! Wrong seed phrase or corrupted message.")
     except Exception as e:
@@ -519,6 +519,7 @@ bot.set_my_commands([
     telebot.types.BotCommand("/decrypt", "Decrypt a message sent to you"),
     telebot.types.BotCommand("/sign", "Sign a message so others know it's from you"),
     telebot.types.BotCommand("/verify", "Verify a signed message from a friend"),
+    telebot.types.BotCommand("/help", "how to use bot"),
     telebot.types.BotCommand("/abouthashchat", "Learn how HashChat keeps you secure"),
 ])
 
