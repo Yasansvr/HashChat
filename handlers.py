@@ -4,113 +4,15 @@ import uuid
 from mnemonic import Mnemonic
 import hashlib
 import binascii
-import json
-import os
-import datetime
 from nacl.public import PrivateKey, PublicKey, SealedBox
 from nacl.signing import SigningKey, VerifyKey
 from nacl.secret import SecretBox
 import nacl.encoding
 import nacl.exceptions
-import threading
-import sys
 
-TOKEN = os.environ.get("BOT_TOKEN")
-if not TOKEN:
-    print("ERROR: BOT_TOKEN environment variable not set. Please export BOT_TOKEN='your_token'")
-    sys.exit(1)
-    
-bot = telebot.TeleBot(TOKEN, parse_mode=None)
-
-DB_FILE = 'users.json'
-MESSAGES_FILE = 'messages.json'
-
-db_lock = threading.Lock()
-messages_lock = threading.Lock()
-
-def load_db():
-    with db_lock:
-        if os.path.exists(DB_FILE) and os.path.getsize(DB_FILE) > 0:
-            try:
-                with open(DB_FILE, 'r') as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                return {}
-        return {}
-
-def save_db(db):
-    with db_lock:
-        with open(DB_FILE, 'w') as f:
-            json.dump(db, f)
-
-def load_messages():
-    with messages_lock:
-        if os.path.exists(MESSAGES_FILE) and os.path.getsize(MESSAGES_FILE) > 0:
-            try:
-                with open(MESSAGES_FILE, 'r') as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                return {}
-        return {}
-
-def save_messages(db):
-    with messages_lock:
-        with open(MESSAGES_FILE, 'w') as f:
-            json.dump(db, f)
-
-
-
-def get_keys_from_password(password: str):
-    # Hash password to get a 32-byte master seed
-    master_seed = hashlib.sha256(password.strip().encode('utf-8')).digest()
-    
-    # Derive distinct sub-keys for encryption and signing to prevent cross-protocol attacks
-    enc_seed = hashlib.sha256(master_seed + b"encryption").digest()
-    sign_seed = hashlib.sha256(master_seed + b"signing").digest()
-    
-    # Generate X25519 keypair for encryption
-    enc_private_key = PrivateKey(enc_seed)
-    enc_public_key = enc_private_key.public_key
-    
-    # Generate Ed25519 keypair for signing
-    sign_private_key = SigningKey(sign_seed)
-    sign_public_key = sign_private_key.verify_key
-    
-    return {
-        'enc_priv': enc_private_key,
-        'enc_pub': enc_public_key,
-        'sign_priv': sign_private_key,
-        'sign_pub': sign_public_key
-    }
-
-def get_seed_from_input(chat_id: int, user_input: str) -> str:
-    """Attempts to treat user_input as a custom password, returning the unlocked seed phrase.
-       If decryption fails or it's not a password, assumes the input IS the seed phrase."""
-    if not user_input:
-        return ""
-        
-    db = load_db()
-    encrypted_seed = None
-    
-    # Find user's encrypted seed in the database
-    for sid, data in db.items():
-        if sid == str(chat_id) or (isinstance(data, dict) and data.get('chat_id') == chat_id):
-            if isinstance(data, dict) and 'encrypted_seed' in data:
-                encrypted_seed = data['encrypted_seed']
-            break
-            
-    if encrypted_seed:
-        try:
-            # Try to decrypt using the input as the password
-            password_hash = hashlib.sha256(user_input.strip().encode('utf-8')).digest()
-            box = SecretBox(password_hash)
-            decrypted = box.decrypt(binascii.unhexlify(encrypted_seed))
-            return decrypted.decode('utf-8')
-        except Exception:
-            pass
-            
-    # If decryption fails or not set, assume input is the raw seed phrase
-    return user_input.strip()
+from bot_instance import bot
+from database import load_db, save_db, load_messages, save_messages
+from crypto_utils import get_keys_from_password, get_seed_from_input
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -144,11 +46,9 @@ def send_help(message):
         "/decrypt or /newHashMsg - Decrypt a message sent to you.\n"
         "/sign - Sign a message so others know it's from you.\n"
         "/verify - Verify a signed message from a friend.\n"
-        "/cleardb - Delete your encrypted messages from the server.\n"
         "/abouthashchat - Learn about HashChat's security."
     )
     bot.reply_to(message, help_text)
-
 
 # --- /aboutHashChat ---
 @bot.message_handler(commands=['abouthashchat'])
@@ -352,36 +252,25 @@ def process_encrypt_final(message, pub_key_hex, msg_text):
         bot.reply_to(message, "Invalid public key format. Please provide a valid hex string.")
         return
         
-    db = load_db()
-    friend_chat_id = None
-    friend_short_id = None
-    for sid, keys in db.items():
-        if isinstance(keys, dict) and keys.get('enc_pub') == pub_key_hex:
-            friend_chat_id = keys.get('chat_id') or sid
-            friend_short_id = sid
-            break
-            
-    sender_short_id = str(message.chat.id)
-    for sid, keys in db.items():
-        if isinstance(keys, dict) and keys.get('chat_id') == message.chat.id:
-            sender_short_id = sid
-            break
-            
     try:
         sealed_box = SealedBox(friend_pub_key)
         encrypted = sealed_box.encrypt(msg_text.encode('utf-8'), encoder=nacl.encoding.HexEncoder)
         encrypted_text = encrypted.decode('utf-8')
         
-        # Generate short ID for the message
-        msg_id = hashlib.sha256(encrypted_text.encode()).hexdigest()[:10]
+        # Generate short ID from the last 8 chars of ciphertext
+        msg_id = encrypted_text[-8:]
         msg_db = load_messages()
-        msg_db[msg_id] = {
-            'ciphertext': encrypted_text,
-            'sender_chat_id': message.chat.id,
-            'friend_chat_id': friend_chat_id
-        }
+        msg_db[msg_id] = encrypted_text
         save_messages(msg_db)
         
+        # Try to find friend's chat ID to notify them directly
+        db = load_db()
+        friend_chat_id = None
+        for sid, keys in db.items():
+            if isinstance(keys, dict) and keys.get('enc_pub') == pub_key_hex:
+                friend_chat_id = keys.get('chat_id')
+                break
+                
         if friend_chat_id:
             # Send to friend
             bot.send_message(friend_chat_id, f"🔒You received a new encrypted message!\n`/newHashMsg_{msg_id}`", parse_mode='Markdown')
@@ -457,6 +346,18 @@ def process_decrypt_password(message, encrypted_hex):
         encrypted_bytes = binascii.unhexlify(encrypted_hex)
         decrypted = unseal_box.decrypt(encrypted_bytes)
         bot.send_message(message.chat.id, f"📭Decrypted Message:\n{decrypted.decode('utf-8')}")
+        
+        # Auto-delete from DB
+        messages_db = load_messages()
+        deleted = False
+        for key, val in list(messages_db.items()):
+            actual_cipher = val.get('ciphertext') if isinstance(val, dict) else val
+            if actual_cipher == encrypted_hex:
+                del messages_db[key]
+                deleted = True
+        if deleted:
+            save_messages(messages_db)
+            
     except nacl.exceptions.CryptoError:
         bot.send_message(message.chat.id, "Decryption failed! Wrong seed phrase or corrupted message.")
     except Exception as e:
@@ -542,29 +443,6 @@ def process_verify_final(message, pub_key_hex, signed_hex):
     except Exception as e:
         bot.reply_to(message, f"Verification failed: {e}")
 
-# --- /cleardb ---
-@bot.message_handler(commands=['cleardb'])
-def cmd_cleardb(message):
-    msg_db = load_messages()
-    to_delete = []
-    
-    user_chat_id = message.chat.id
-    
-    for msg_id, data in msg_db.items():
-        if isinstance(data, dict):
-            if data.get('sender_chat_id') == user_chat_id or data.get('friend_chat_id') == user_chat_id:
-                to_delete.append(msg_id)
-                
-    if not to_delete:
-        bot.reply_to(message, "No messages found in the database that belong to you (sent or received). Note: older messages from before this feature was added cannot be cleared automatically.")
-        return
-        
-    for msg_id in to_delete:
-        del msg_db[msg_id]
-        
-    save_messages(msg_db)
-    bot.reply_to(message, f"✅ Successfully deleted {len(to_delete)} of your encrypted messages from the server. Any /newHashMsg links for these messages will no longer work.")
-
 # --- Inline Query Handler ---
 @bot.inline_handler(lambda query: len(query.query) > 0)
 def query_text(query):
@@ -591,22 +469,9 @@ def query_text(query):
                 encrypted = sealed_box.encrypt(msg_text.encode('utf-8'), encoder=nacl.encoding.HexEncoder)
                 encrypted_text = encrypted.decode('utf-8')
                 
-                msg_id = hashlib.sha256(encrypted_text.encode()).hexdigest()[:10]
+                msg_id = encrypted_text[-8:]
                 msg_db = load_messages()
-                
-                # Try to determine friend_chat_id for ownership tracking
-                db = load_db()
-                friend_chat_id = None
-                for sid, keys in db.items():
-                    if isinstance(keys, dict) and keys.get('enc_pub') == pub_key_hex:
-                        friend_chat_id = keys.get('chat_id')
-                        break
-                
-                msg_db[msg_id] = {
-                    'ciphertext': encrypted_text,
-                    'sender_chat_id': query.from_user.id,
-                    'friend_chat_id': friend_chat_id
-                }
+                msg_db[msg_id] = encrypted_text
                 save_messages(msg_db)
                 
                 results.append(InlineQueryResultArticle(
@@ -671,18 +536,3 @@ def query_text(query):
         ))
         
     bot.answer_inline_query(query.id, results)
-
-bot.set_my_commands([
-    telebot.types.BotCommand("/newkey", "Generate a 12-word seed phrase and get your keys"),
-    telebot.types.BotCommand("/delkey", "Delete your active keys"),
-    telebot.types.BotCommand("/setpassword", "Lock your 12-word seed phrase with a custom password"),
-    telebot.types.BotCommand("/encrypt", "Encrypt and send a message to a friend's public key"),
-    telebot.types.BotCommand("/decrypt", "Decrypt a message sent to you"),
-    telebot.types.BotCommand("/sign", "Sign a message so others know it's from you"),
-    telebot.types.BotCommand("/verify", "Verify a signed message from a friend"),
-    telebot.types.BotCommand("/cleardb", "Delete your encrypted messages from the server"),
-    telebot.types.BotCommand("/help", "how to use bot"),
-    telebot.types.BotCommand("/abouthashchat", "Learn how HashChat keeps you secure"),
-])
-
-bot.infinity_polling()
