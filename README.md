@@ -28,7 +28,7 @@ It is highly recommended to run the bot inside a Python virtual environment to m
 python3 -m venv .venv
 
 # Activate the virtual environment
-source .venv/bin/activate
+source .venv/bin/activate25
 ```
 
 ### 2. Install Dependencies
