@@ -8,6 +8,28 @@ Features:
 - **Seed Phrase & Custom Passwords**: Keys are generated from a 12-word seed phrase, which you can securely lock behind a custom password.
 - **Short Routing IDs**: Anonymous ID system to route messages to the correct user.
 
+## Verifying Project Authenticity
+
+To ensure that the code you are running is authentic and hasn't been tampered with, you can verify the cryptographic signatures of the commits or release archives using the author's public GPG key included in this repository.
+
+### 1. Import the Public Key
+First, import the provided `lsinxl.asc` key into your local GPG keychain:
+```bash
+gpg --import lsinxl.asc
+```
+
+### 2. Verify Git Commits
+If you cloned this repository via Git, you can verify that the commits were genuinely signed by the author:
+```bash
+git log --show-signature
+```
+
+### 3. Verify Release Archives
+If you downloaded a compressed source archive (`.tar.gz`) along with its detached signature file (`.asc`), you can verify the archive's integrity before extracting it:
+```bash
+gpg --verify telegram_code.tar.gz.asc telegram_code.tar.gz
+```
+
 ## Requirements
 
 The project uses the following Python libraries:
