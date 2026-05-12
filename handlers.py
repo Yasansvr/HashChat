@@ -9,6 +9,8 @@ from nacl.signing import SigningKey, VerifyKey
 from nacl.secret import SecretBox
 import nacl.encoding
 import nacl.exceptions
+import nacl.pwhash
+import nacl.utils
 
 from bot_instance import bot
 from database import load_db, save_db, load_messages, save_messages
@@ -166,16 +168,27 @@ def process_setpassword_step2(message, user_sid, seed_phrase):
         return
 
     try:
+        # Generate a random salt
+        salt = nacl.utils.random(nacl.pwhash.argon2id.SALTBYTES)
+        
         # Encrypt the seed phrase using the password
-        password_hash = hashlib.sha256(custom_password.encode('utf-8')).digest()
+        password_hash = nacl.pwhash.argon2id.kdf(
+            SecretBox.KEY_SIZE,
+            custom_password.encode('utf-8'),
+            salt,
+            opslimit=nacl.pwhash.argon2id.OPSLIMIT_SENSITIVE,
+            memlimit=nacl.pwhash.argon2id.MEMLIMIT_SENSITIVE
+        )
         box = SecretBox(password_hash)
         encrypted = box.encrypt(seed_phrase.encode('utf-8'))
         encrypted_hex = binascii.hexlify(encrypted).decode('utf-8')
+        salt_hex = binascii.hexlify(salt).decode('utf-8')
 
         # Save to DB
         db = load_db()
         if user_sid in db and isinstance(db[user_sid], dict):
             db[user_sid]['encrypted_seed'] = encrypted_hex
+            db[user_sid]['password_salt'] = salt_hex
             save_db(db)
             bot.send_message(message.chat.id, "✅ Success! Your 12-word seed phrase is now securely encrypted and locked behind your custom password on this server.\n\nFrom now on, when the bot asks for your seed phrase, you can just reply with your custom password!")
         else:
@@ -451,43 +464,7 @@ def query_text(query):
     
     results = []
     
-    if cmd == 'encrypt':
-        if len(parts) < 3:
-            results.append(InlineQueryResultArticle(
-                id=str(uuid.uuid4()),
-                title="Encrypt Message",
-                description="Usage: encrypt [pub_key_hex] [message(use '-' instead space)]",
-                input_message_content=InputTextMessageContent("Waiting for full encryption parameters...")
-            ))
-        else:
-            pub_key_hex = parts[1].strip().replace('`', '')
-            msg_text = parts[2].strip()
-            try:
-                pub_key_bytes = binascii.unhexlify(pub_key_hex)
-                friend_pub_key = PublicKey(pub_key_bytes)
-                sealed_box = SealedBox(friend_pub_key)
-                encrypted = sealed_box.encrypt(msg_text.encode('utf-8'), encoder=nacl.encoding.HexEncoder)
-                encrypted_text = encrypted.decode('utf-8')
-                
-                msg_id = encrypted_text[-8:]
-                msg_db = load_messages()
-                msg_db[msg_id] = encrypted_text
-                save_messages(msg_db)
-                
-                results.append(InlineQueryResultArticle(
-                    id=str(uuid.uuid4()),
-                    title="Send Encrypted Message",
-                    description="Tap to send ciphertext to chat",
-                    input_message_content=InputTextMessageContent(f"🔒 You received an encrypted message!\n`/newHashMsg_{msg_id}`", parse_mode='Markdown')
-                ))
-            except Exception as e:
-                results.append(InlineQueryResultArticle(
-                    id=str(uuid.uuid4()),
-                    title="Encryption Error",
-                    description="Check public key format",
-                    input_message_content=InputTextMessageContent(f"Error: {e}")
-                ))
-    elif cmd == 'verify':
+    if cmd == 'verify':
         if len(parts) < 3:
             results.append(InlineQueryResultArticle(
                 id=str(uuid.uuid4()),
@@ -520,19 +497,19 @@ def query_text(query):
             except Exception as e:
                 pass
                 
-    elif cmd in ['sign', 'decrypt']:
+    elif cmd in ['sign', 'decrypt', 'encrypt']:
         results.append(InlineQueryResultArticle(
             id=str(uuid.uuid4()),
             title="Action Not Allowed Inline",
-            description="For security, sign and decrypt must be done in the private bot chat.",
-            input_message_content=InputTextMessageContent("Security Error: Seed phrases cannot be safely entered in inline queries.")
+            description="For security, encrypt, sign and decrypt must be done in the private bot chat.",
+            input_message_content=InputTextMessageContent("Security Error: Seed phrases and plaintext cannot be safely entered in inline queries.")
         ))
     else:
         results.append(InlineQueryResultArticle(
             id=str(uuid.uuid4()),
             title="Available Inline Commands",
-            description="encrypt [pub_key] [msg]  OR  verify [pub_key] [msg]",
-            input_message_content=InputTextMessageContent("Invalid inline command. Use encrypt or verify.")
+            description="verify [pub_key] [msg]",
+            input_message_content=InputTextMessageContent("Invalid inline command. Use verify.")
         ))
         
     bot.answer_inline_query(query.id, results)

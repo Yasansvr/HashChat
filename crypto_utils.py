@@ -5,6 +5,8 @@ from nacl.signing import SigningKey, VerifyKey
 from nacl.secret import SecretBox
 import nacl.encoding
 import nacl.exceptions
+import nacl.pwhash
+import nacl.utils
 from database import load_db
 
 def get_keys_from_password(password: str):
@@ -38,18 +40,31 @@ def get_seed_from_input(chat_id: int, user_input: str) -> str:
         
     db = load_db()
     encrypted_seed = None
+    password_salt = None
     
     # Find user's encrypted seed in the database
     for sid, data in db.items():
         if sid == str(chat_id) or (isinstance(data, dict) and data.get('chat_id') == chat_id):
             if isinstance(data, dict) and 'encrypted_seed' in data:
                 encrypted_seed = data['encrypted_seed']
+                password_salt = data.get('password_salt')
             break
             
     if encrypted_seed:
         try:
             # Try to decrypt using the input as the password
-            password_hash = hashlib.sha256(user_input.strip().encode('utf-8')).digest()
+            if password_salt:
+                salt_bytes = binascii.unhexlify(password_salt)
+                password_hash = nacl.pwhash.argon2id.kdf(
+                    SecretBox.KEY_SIZE,
+                    user_input.strip().encode('utf-8'),
+                    salt_bytes,
+                    opslimit=nacl.pwhash.argon2id.OPSLIMIT_SENSITIVE,
+                    memlimit=nacl.pwhash.argon2id.MEMLIMIT_SENSITIVE
+                )
+            else:
+                password_hash = hashlib.sha256(user_input.strip().encode('utf-8')).digest()
+                
             box = SecretBox(password_hash)
             decrypted = box.decrypt(binascii.unhexlify(encrypted_seed))
             return decrypted.decode('utf-8')
