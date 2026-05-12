@@ -398,8 +398,8 @@ def process_encrypt_final(message, pub_key_hex, msg_text):
         encrypted = sealed_box.encrypt(msg_text.encode('utf-8'), encoder=nacl.encoding.HexEncoder)
         encrypted_text = encrypted.decode('utf-8')
         
-        # Generate short ID for the message
-        msg_id = hashlib.sha256(encrypted_text.encode()).hexdigest()[:10]
+        # Generate short ID from the last 8 chars of ciphertext
+        msg_id = encrypted_text[-8:]
         msg_db = load_messages()
         msg_db[msg_id] = {
             'ciphertext': encrypted_text,
@@ -410,56 +410,61 @@ def process_encrypt_final(message, pub_key_hex, msg_text):
         
         if friend_chat_id:
             # Send to friend
-            bot.send_message(friend_chat_id, f"🔒You received a new encrypted message!\n`/newHashMsg_{msg_id}`", parse_mode='Markdown')
+            bot.send_message(friend_chat_id, f"🔒 You received a new encrypted message!\n\n/decrypt", parse_mode='Markdown')
             bot.reply_to(message, "Message successfully encrypted and routed to the owner of that public key!")
         else:
-            bot.reply_to(message, f"Encrypted message (I don't know who owns this key, so please copy and send it manually):\n`/newHashMsg_{msg_id}`", parse_mode='Markdown')
+            bot.reply_to(message, f"Encrypted message (I don't know who owns this key, so please copy and send it manually):\n\n`{encrypted_text}`\n\n/decrypt", parse_mode='Markdown')
     except Exception as e:
         bot.reply_to(message, f"Encryption failed: {e}")
 
 # --- /decrypt or /newHashMsg ---
-@bot.message_handler(commands=['decrypt', 'newHashMsg'])
-@bot.message_handler(regexp=r'^/(decrypt|newHashMsg)_[a-zA-Z0-9]+')
+@bot.message_handler(commands=['decrypt'])
 def cmd_decrypt(message):
     text = message.text.strip()
     
-    # Handle /newHashMsg_ID or /decrypt_ID format
-    if '_' in text.split(' ')[0]:
-        cmd_part = text.split(' ')[0]
-        encrypted_hex = cmd_part.split('_', 1)[1]
-        
-        messages_db = load_messages()
-        if encrypted_hex in messages_db:
-            val = messages_db[encrypted_hex]
-            encrypted_hex = val.get('ciphertext') if isinstance(val, dict) else val
-            
-        msg = bot.reply_to(message, "🔑Please reply with your custom password OR your 12-word seed phrase to decrypt. I will delete your reply.")
-        bot.register_next_step_handler(msg, process_decrypt_password, encrypted_hex)
-        return
-
-    # Handle /newHashMsg [message] format
     parts = text.split(' ', 1)
     if len(parts) == 2:
         encrypted_hex = parts[1]
-        messages_db = load_messages()
-        if encrypted_hex in messages_db:
-            val = messages_db[encrypted_hex]
-            encrypted_hex = val.get('ciphertext') if isinstance(val, dict) else val
-            
-        msg = bot.reply_to(message, "Please reply with your custom password OR your 12-word seed phrase to decrypt. I will delete your reply.")
+        msg = bot.reply_to(message, "🔑Please reply with your custom password OR your 12-word seed phrase to decrypt. I will delete your reply.")
         bot.register_next_step_handler(msg, process_decrypt_password, encrypted_hex)
     elif len(parts) == 1:
-        msg = bot.reply_to(message, "Please reply with the encrypted message you want to decrypt.")
-        bot.register_next_step_handler(msg, process_decrypt_msg_step)
+        messages_db = load_messages()
+        user_chat_id = message.chat.id
+        
+        pending_messages = []
+        for msg_id, val in messages_db.items():
+            if isinstance(val, dict) and val.get('friend_chat_id') == user_chat_id:
+                pending_messages.append(msg_id)
+                
+        if not pending_messages:
+            msg = bot.reply_to(message, "You have no pending messages. Please reply with the encrypted message you want to decrypt.")
+            bot.register_next_step_handler(msg, process_decrypt_msg_step)
+            return
+            
+        markup = telebot.types.InlineKeyboardMarkup()
+        for msg_id in pending_messages:
+            markup.add(telebot.types.InlineKeyboardButton(text=f"ID: {msg_id}", callback_data=f"dec_{msg_id}"))
+            
+        bot.reply_to(message, "Select a pending message to decrypt:", reply_markup=markup)
     else:
         bot.reply_to(message, "Usage: /decrypt OR /decrypt [encrypted_message_hex]")
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('dec_'))
+def callback_decrypt(call):
+    msg_id = call.data.split('_')[1]
+    
+    messages_db = load_messages()
+    if msg_id in messages_db:
+        val = messages_db[msg_id]
+        encrypted_hex = val.get('ciphertext') if isinstance(val, dict) else val
+        msg = bot.send_message(call.message.chat.id, f"🔑 Decrypting Message {msg_id}.\nPlease reply with your custom password OR your 12-word seed phrase. I will delete your reply.")
+        bot.register_next_step_handler(msg, process_decrypt_password, encrypted_hex)
+    else:
+        bot.send_message(call.message.chat.id, "Message not found in database.")
+    bot.answer_callback_query(call.id)
+
 def process_decrypt_msg_step(message):
     encrypted_hex = message.text.strip()
-    messages_db = load_messages()
-    if encrypted_hex in messages_db:
-        val = messages_db[encrypted_hex]
-        encrypted_hex = val.get('ciphertext') if isinstance(val, dict) else val
         
     msg = bot.reply_to(message, "Please reply with your custom password OR your 12-word seed phrase to decrypt. I will delete your reply.")
     bot.register_next_step_handler(msg, process_decrypt_password, encrypted_hex)
@@ -483,6 +488,17 @@ def process_decrypt_password(message, encrypted_hex):
         encrypted_bytes = binascii.unhexlify(encrypted_hex)
         decrypted = unseal_box.decrypt(encrypted_bytes)
         bot.send_message(message.chat.id, f"📭Decrypted Message:\n{decrypted.decode('utf-8')}")
+        
+        # Auto-delete from DB
+        messages_db = load_messages()
+        deleted = False
+        for key, val in list(messages_db.items()):
+            actual_cipher = val.get('ciphertext') if isinstance(val, dict) else val
+            if actual_cipher == encrypted_hex:
+                del messages_db[key]
+                deleted = True
+        if deleted:
+            save_messages(messages_db)
     except nacl.exceptions.CryptoError:
         bot.send_message(message.chat.id, "Decryption failed! Wrong seed phrase or corrupted message.")
     except Exception as e:
