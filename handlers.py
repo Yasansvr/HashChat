@@ -278,7 +278,7 @@ def process_encrypt_final(message, pub_key_hex, msg_text):
                 
         # Generate a unique short ID for the message
         with messages_transaction() as msg_db:
-            msg_id = uuid.uuid4().hex[:8]
+            msg_id = uuid.uuid4().hex[:8] #bypass bruteforcing
             while msg_id in msg_db:
                 msg_id = uuid.uuid4().hex[:8]
                 
