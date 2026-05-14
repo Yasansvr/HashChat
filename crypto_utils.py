@@ -59,8 +59,8 @@ def get_seed_from_input(chat_id: int, user_input: str) -> str:
                     SecretBox.KEY_SIZE,
                     user_input.strip().encode('utf-8'),
                     salt_bytes,
-                    opslimit=nacl.pwhash.argon2id.OPSLIMIT_SENSITIVE,
-                    memlimit=nacl.pwhash.argon2id.MEMLIMIT_SENSITIVE
+                    opslimit=nacl.pwhash.argon2id.OPSLIMIT_INTERACTIVE,
+                    memlimit=nacl.pwhash.argon2id.MEMLIMIT_INTERACTIVE
                 )
             else:
                 password_hash = hashlib.sha256(user_input.strip().encode('utf-8')).digest()

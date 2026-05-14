@@ -16,6 +16,7 @@ import nacl.pwhash
 import nacl.utils
 import threading
 import sys
+import contextlib
 
 TOKEN = os.environ.get("BOT_TOKEN")
 if not TOKEN:
@@ -45,6 +46,21 @@ def save_db(db):
         with open(DB_FILE, 'w') as f:
             json.dump(db, f)
 
+@contextlib.contextmanager
+def db_transaction():
+    with db_lock:
+        if os.path.exists(DB_FILE) and os.path.getsize(DB_FILE) > 0:
+            try:
+                with open(DB_FILE, 'r') as f:
+                    db = json.load(f)
+            except json.JSONDecodeError:
+                db = {}
+        else:
+            db = {}
+        yield db
+        with open(DB_FILE, 'w') as f:
+            json.dump(db, f)
+
 def load_messages():
     with messages_lock:
         if os.path.exists(MESSAGES_FILE) and os.path.getsize(MESSAGES_FILE) > 0:
@@ -57,6 +73,21 @@ def load_messages():
 
 def save_messages(db):
     with messages_lock:
+        with open(MESSAGES_FILE, 'w') as f:
+            json.dump(db, f)
+
+@contextlib.contextmanager
+def messages_transaction():
+    with messages_lock:
+        if os.path.exists(MESSAGES_FILE) and os.path.getsize(MESSAGES_FILE) > 0:
+            try:
+                with open(MESSAGES_FILE, 'r') as f:
+                    db = json.load(f)
+            except json.JSONDecodeError:
+                db = {}
+        else:
+            db = {}
+        yield db
         with open(MESSAGES_FILE, 'w') as f:
             json.dump(db, f)
 
@@ -112,8 +143,8 @@ def get_seed_from_input(chat_id: int, user_input: str) -> str:
                     SecretBox.KEY_SIZE,
                     user_input.strip().encode('utf-8'),
                     salt_bytes,
-                    opslimit=nacl.pwhash.argon2id.OPSLIMIT_SENSITIVE,
-                    memlimit=nacl.pwhash.argon2id.MEMLIMIT_SENSITIVE
+                    opslimit=nacl.pwhash.argon2id.OPSLIMIT_INTERACTIVE,
+                    memlimit=nacl.pwhash.argon2id.MEMLIMIT_INTERACTIVE
                 )
             else:
                 password_hash = hashlib.sha256(user_input.strip().encode('utf-8')).digest()
@@ -203,17 +234,17 @@ def cmd_newkey(message):
     enc_pub_hex = keys['enc_pub'].encode(encoder=nacl.encoding.HexEncoder).decode('utf-8')
     sign_pub_hex = keys['sign_pub'].encode(encoder=nacl.encoding.HexEncoder).decode('utf-8')
     
-    # Save to DB with short ID
-    short_id = uuid.uuid4().hex[:8]
-    while short_id in db:
+    with db_transaction() as db:
+        # Save to DB with short ID
         short_id = uuid.uuid4().hex[:8]
-        
-    db[short_id] = {
-        'chat_id': message.chat.id,
-        'enc_pub': enc_pub_hex,
-        'sign_pub': sign_pub_hex
-    }
-    save_db(db)
+        while short_id in db:
+            short_id = uuid.uuid4().hex[:8]
+            
+        db[short_id] = {
+            'chat_id': message.chat.id,
+            'enc_pub': enc_pub_hex,
+            'sign_pub': sign_pub_hex
+        }
     
     reply = (
         "Here is your new secret identity!\n\n"
@@ -289,8 +320,8 @@ def process_setpassword_step2(message, user_sid, seed_phrase):
             SecretBox.KEY_SIZE,
             custom_password.encode('utf-8'),
             salt,
-            opslimit=nacl.pwhash.argon2id.OPSLIMIT_SENSITIVE,
-            memlimit=nacl.pwhash.argon2id.MEMLIMIT_SENSITIVE
+            opslimit=nacl.pwhash.argon2id.OPSLIMIT_INTERACTIVE,
+            memlimit=nacl.pwhash.argon2id.MEMLIMIT_INTERACTIVE
         )
         box = SecretBox(password_hash)
         encrypted = box.encrypt(seed_phrase.encode('utf-8'))
@@ -298,14 +329,13 @@ def process_setpassword_step2(message, user_sid, seed_phrase):
         salt_hex = binascii.hexlify(salt).decode('utf-8')
 
         # Save to DB
-        db = load_db()
-        if user_sid in db and isinstance(db[user_sid], dict):
-            db[user_sid]['encrypted_seed'] = encrypted_hex
-            db[user_sid]['password_salt'] = salt_hex
-            save_db(db)
-            bot.send_message(message.chat.id, "✅ Success! Your 12-word seed phrase is now securely encrypted and locked behind your custom password on this server.\n\nFrom now on, when the bot asks for your seed phrase, you can just reply with your custom password!")
-        else:
-            bot.send_message(message.chat.id, "Error: User not found in database during save.")
+        with db_transaction() as db:
+            if user_sid in db and isinstance(db[user_sid], dict):
+                db[user_sid]['encrypted_seed'] = encrypted_hex
+                db[user_sid]['password_salt'] = salt_hex
+                bot.send_message(message.chat.id, "✅ Success! Your 12-word seed phrase is now securely encrypted and locked behind your custom password on this server.\n\nFrom now on, when the bot asks for your seed phrase, you can just reply with your custom password!")
+            else:
+                bot.send_message(message.chat.id, "Error: User not found in database during save.")
     except Exception as e:
         bot.send_message(message.chat.id, f"Encryption error: {e}")
 
@@ -334,19 +364,18 @@ def process_delkey_password(message):
         bot.send_message(message.chat.id, "Invalid seed phrase.")
         return
 
-    db = load_db()
-    to_delete = None
-    for sid, data in db.items():
-        if (sid == str(message.chat.id) or (isinstance(data, dict) and data.get('chat_id') == message.chat.id)) and (isinstance(data, dict) and data.get('enc_pub') == enc_pub_hex):
-            to_delete = sid
-            break
-            
-    if to_delete:
-        del db[to_delete]
-        save_db(db)
-        bot.send_message(message.chat.id, "✅ Your keys and Routing ID have been permanently deleted from the database. You are no longer registered.\n\nYou can generate new keys anytime using /newkey.")
-    else:
-        bot.send_message(message.chat.id, "Seed phrase does not match your active keys, or you don't have any active keys.")
+    with db_transaction() as db:
+        to_delete = None
+        for sid, data in db.items():
+            if (sid == str(message.chat.id) or (isinstance(data, dict) and data.get('chat_id') == message.chat.id)) and (isinstance(data, dict) and data.get('enc_pub') == enc_pub_hex):
+                to_delete = sid
+                break
+                
+        if to_delete:
+            del db[to_delete]
+            bot.send_message(message.chat.id, "✅ Your keys and Routing ID have been permanently deleted from the database. You are no longer registered.\n\nYou can generate new keys anytime using /newkey.")
+        else:
+            bot.send_message(message.chat.id, "Seed phrase does not match your active keys, or you don't have any active keys.")
 
 # --- /encrypt ---
 @bot.message_handler(commands=['encrypt'])
@@ -398,15 +427,17 @@ def process_encrypt_final(message, pub_key_hex, msg_text):
         encrypted = sealed_box.encrypt(msg_text.encode('utf-8'), encoder=nacl.encoding.HexEncoder)
         encrypted_text = encrypted.decode('utf-8')
         
-        # Generate short ID from the last 8 chars of ciphertext
-        msg_id = encrypted_text[-8:]
-        msg_db = load_messages()
-        msg_db[msg_id] = {
-            'ciphertext': encrypted_text,
-            'sender_chat_id': message.chat.id,
-            'friend_chat_id': friend_chat_id
-        }
-        save_messages(msg_db)
+        # Generate a unique short ID for the message
+        with messages_transaction() as msg_db:
+            msg_id = uuid.uuid4().hex[:8]
+            while msg_id in msg_db:
+                msg_id = uuid.uuid4().hex[:8]
+                
+            msg_db[msg_id] = {
+                'ciphertext': encrypted_text,
+                'sender_chat_id': message.chat.id,
+                'friend_chat_id': friend_chat_id
+            }
         
         if friend_chat_id:
             # Send to friend
@@ -490,15 +521,11 @@ def process_decrypt_password(message, encrypted_hex):
         bot.send_message(message.chat.id, f"📭Decrypted Message:\n{decrypted.decode('utf-8')}")
         
         # Auto-delete from DB
-        messages_db = load_messages()
-        deleted = False
-        for key, val in list(messages_db.items()):
-            actual_cipher = val.get('ciphertext') if isinstance(val, dict) else val
-            if actual_cipher == encrypted_hex:
-                del messages_db[key]
-                deleted = True
-        if deleted:
-            save_messages(messages_db)
+        with messages_transaction() as messages_db:
+            for key, val in list(messages_db.items()):
+                actual_cipher = val.get('ciphertext') if isinstance(val, dict) else val
+                if actual_cipher == encrypted_hex:
+                    del messages_db[key]
     except nacl.exceptions.CryptoError:
         bot.send_message(message.chat.id, "Decryption failed! Wrong seed phrase or corrupted message.")
     except Exception as e:
@@ -587,25 +614,24 @@ def process_verify_final(message, pub_key_hex, signed_hex):
 # --- /cleardb ---
 @bot.message_handler(commands=['cleardb'])
 def cmd_cleardb(message):
-    msg_db = load_messages()
-    to_delete = []
-    
-    user_chat_id = message.chat.id
-    
-    for msg_id, data in msg_db.items():
-        if isinstance(data, dict):
-            if data.get('sender_chat_id') == user_chat_id or data.get('friend_chat_id') == user_chat_id:
-                to_delete.append(msg_id)
-                
-    if not to_delete:
-        bot.reply_to(message, "No messages found in the database that belong to you (sent or received). Note: older messages from before this feature was added cannot be cleared automatically.")
-        return
+    with messages_transaction() as msg_db:
+        to_delete = []
         
-    for msg_id in to_delete:
-        del msg_db[msg_id]
+        user_chat_id = message.chat.id
         
-    save_messages(msg_db)
-    bot.reply_to(message, f"✅ Successfully deleted {len(to_delete)} of your encrypted messages from the server. Any /newHashMsg links for these messages will no longer work.")
+        for msg_id, data in msg_db.items():
+            if isinstance(data, dict):
+                if data.get('sender_chat_id') == user_chat_id or data.get('friend_chat_id') == user_chat_id:
+                    to_delete.append(msg_id)
+                    
+        if not to_delete:
+            bot.reply_to(message, "No messages found in the database that belong to you (sent or received). Note: older messages from before this feature was added cannot be cleared automatically.")
+            return
+            
+        for msg_id in to_delete:
+            del msg_db[msg_id]
+            
+        bot.reply_to(message, f"✅ Successfully deleted {len(to_delete)} of your encrypted messages from the server. Any /newHashMsg links for these messages will no longer work.")
 
 # --- Inline Query Handler ---
 @bot.inline_handler(lambda query: len(query.query) > 0)
