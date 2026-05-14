@@ -218,24 +218,21 @@ def cmd_about(message):
 # --- /newkey ---
 @bot.message_handler(commands=['newkey'])
 def cmd_newkey(message):
-    db = load_db()
-    
-    # Check if user already has keys
-    for sid, data in db.items():
-        if sid == str(message.chat.id) or (isinstance(data, dict) and data.get('chat_id') == message.chat.id):
-            bot.reply_to(message, "You already have active keys! Please delete them first using /delkey.")
-            return
-
-    mnemo = Mnemonic("english")
-    seed_phrase = mnemo.generate(strength=128)
-    
-    keys = get_keys_from_password(seed_phrase)
-    
-    enc_pub_hex = keys['enc_pub'].encode(encoder=nacl.encoding.HexEncoder).decode('utf-8')
-    sign_pub_hex = keys['sign_pub'].encode(encoder=nacl.encoding.HexEncoder).decode('utf-8')
-    
     with db_transaction() as db:
-        # Save to DB with short ID
+        # Check if user already has keys
+        for sid, data in db.items():
+            if sid == str(message.chat.id) or (isinstance(data, dict) and data.get('chat_id') == message.chat.id):
+                bot.reply_to(message, "You already have active keys! Please delete them first using /delkey.")
+                return
+
+        mnemo = Mnemonic("english")
+        seed_phrase = mnemo.generate(strength=128)
+        
+        keys = get_keys_from_password(seed_phrase)
+        
+        enc_pub_hex = keys['enc_pub'].encode(encoder=nacl.encoding.HexEncoder).decode('utf-8')
+        sign_pub_hex = keys['sign_pub'].encode(encoder=nacl.encoding.HexEncoder).decode('utf-8')
+        
         short_id = uuid.uuid4().hex[:8]
         while short_id in db:
             short_id = uuid.uuid4().hex[:8]
@@ -429,6 +426,18 @@ def process_encrypt_final(message, pub_key_hex, msg_text):
         
         # Generate a unique short ID for the message
         with messages_transaction() as msg_db:
+            # DoS Protection: Limit pending messages per sender and recipient
+            sender_msgs = sum(1 for v in msg_db.values() if isinstance(v, dict) and v.get('sender_chat_id') == message.chat.id)
+            if sender_msgs >= 50:
+                bot.reply_to(message, "You have too many pending sent messages. Please wait for them to be read or use /cleardb.")
+                return
+                
+            if friend_chat_id:
+                recipient_msgs = sum(1 for v in msg_db.values() if isinstance(v, dict) and v.get('friend_chat_id') == friend_chat_id)
+                if recipient_msgs >= 50:
+                    bot.reply_to(message, "This user's mailbox is full. They have too many unread messages.")
+                    return
+
             msg_id = uuid.uuid4().hex[:8]
             while msg_id in msg_db:
                 msg_id = uuid.uuid4().hex[:8]
